@@ -742,3 +742,98 @@ class NamedUrlCookieWizardView(NamedUrlWizardView):
     A NamedUrlFormWizard with pre-configured CookieStorageBackend.
     """
     storage_name = 'formtools.wizard.storage.cookie.CookieStorage'
+
+
+class DynamicWizardView(TemplateView):
+    storage_name = None
+    template_name = 'formtools/wizard/wizard_form.html'
+
+    def get_prefix(self, request, *args, **kwargs):
+        return normalize_name(self.__class__.__name__)
+
+    def dispatch(self, request, *args, **kwargs):
+        """
+        This method gets called by the routing engine. The first argument is
+        `request` which contains a `HttpRequest` instance.
+        The request is stored in `self.request` for later use. The storage
+        instance is stored in `self.storage`.
+
+        After processing the request using the `dispatch` method, the
+        response gets updated by the storage engine (for example add cookies).
+        """
+        # add the storage engine to the current wizardview instance
+        self.prefix = self.get_prefix(request, *args, **kwargs)
+        self.storage = get_storage(self.storage_name, self.prefix, request,
+            getattr(self, 'file_storage', None))
+        self.steps = DynamicStepsHelper(self)
+        response = super(DynamicWizardView, self).dispatch(
+            request, *args, **kwargs)
+
+        # update the response (e.g. adding cookies)
+        self.storage.update_response(response)
+        return response
+
+    def get(self, request, *args, **kwargs):
+        """For GETs, we assume the wizard is starting
+        at the beginning. So we reset storage and step history."""
+        self.storage.reset()
+        self.storage.current_step = self.steps.first
+        return self.render(self.get_form())
+
+    def post(self, *args, **kwargs):
+        """For POSTs, we validate the current step's form.
+        If the form is valid, we render the next step.
+        Otherwise, we re-render the current step's form.
+        """
+        current_step = self._get_step_from_post()
+        self.storage.current_step = current_step
+        current_form = self.get_form(step=step_from_post,
+                                     data=self.request.POST,
+                                     files=self.request.FILES)
+        if not current_form.is_valid():
+            return self.render(form=current_form)
+        else:
+            next_step = self.get_next_step(current_step)
+            if next_step == '_done_':
+                self.render_done_view()
+            else:
+                self.render_step(next_step)
+
+    def _get_step_from_post(self):
+        management_form = ManagementForm(self.request.POST, prefix=self.prefix)
+        if not management_form.is_valid():
+            raise ValidationError(
+                _('ManagementForm data is missing or has been tampered.'),
+                code='missing_management_form',
+            )
+        return management_form.cleaned_data['current_step']
+
+    def get_form(self, step=None, data=None, files=none):
+        pass
+
+    def render(self, form=None):
+        pass
+
+    def render_step(self, step=None):
+
+        # and try to validate
+        if form.is_valid():
+            # if the form is valid, store the cleaned data and files.
+            self.storage.set_step_data(self.steps.current,
+                                       self.process_step(form))
+            self.storage.set_step_files(self.steps.current,
+                                        self.process_step_files(form))
+
+            # check if the current step is the last step
+            if self.steps.current == self.steps.last:
+                # no more steps, render done view
+                return self.render_done(form, **kwargs)
+            else:
+                # proceed to the next step
+                return self.render_next_step(form)
+        return self.render(form)
+
+    def get_form_prefix(self, step=None, form=None):
+        if step is None:
+            step = self.steps.current
+        return str(step)
